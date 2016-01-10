@@ -25,7 +25,6 @@ import java.net.URI;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -247,7 +246,7 @@ public class WsdlDownloadMojo extends AbstractMojo {
 
     private Path rootDownloadPath() throws IOException {
         if (rootDownloadPath == null) {
-            rootDownloadPath = Files.createDirectories(Paths.get(project.getBuild().getDirectory()).resolve(downloadDirectory));
+            rootDownloadPath = Files.createDirectories(project.getBasedir().toPath().resolve(downloadDirectory));
         }
 
         return rootDownloadPath;
@@ -255,7 +254,7 @@ public class WsdlDownloadMojo extends AbstractMojo {
 
     private Path includeDownloadPath() throws IOException {
         if (includeDownloadPath == null) {
-            includeDownloadPath = Files.createDirectories(Paths.get(project.getBuild().getDirectory()).resolve(downloadDirectory).resolve("inc"));
+            includeDownloadPath = Files.createDirectories(project.getBasedir().toPath().resolve(downloadDirectory).resolve("inc"));
         }
 
         return includeDownloadPath;
