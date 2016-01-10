@@ -1,5 +1,6 @@
 package com.github.windshopper.maven.plugins.wsdl.download;
 
+import com.ebmwebsourcing.easycommons.xml.DefaultNamespaceContext;
 import org.apache.maven.plugin.AbstractMojo;
 import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
@@ -15,16 +16,24 @@ import org.ow2.easywsdl.wsdl.WSDLFactory;
 import org.ow2.easywsdl.wsdl.api.Description;
 import org.ow2.easywsdl.wsdl.api.WSDLReader;
 import org.ow2.easywsdl.wsdl.api.WSDLWriter;
+import org.w3c.dom.Attr;
+import org.w3c.dom.Document;
+import org.w3c.dom.Node;
 
+import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
+import javax.xml.xpath.*;
+import java.io.File;
 import java.io.IOException;
 import java.net.URI;
+import java.net.URISyntaxException;
 import java.net.URL;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.function.Consumer;
@@ -40,22 +49,22 @@ import java.util.stream.Stream;
     threadSafe = true)
 public class WsdlDownloadMojo extends AbstractMojo {
 
-    private static class UnifiedReference<T> {
+    private static class UnifiedRef<T> {
 
-        private final Supplier<T> entitySupplier;
-        private final Consumer<URI> locationSetter;
+        private final Supplier<T> supplier;
+        private final Consumer<URI> uriConsumer;
 
-        public UnifiedReference(Supplier<T> entitySupplier, Consumer<URI> locationSetter) {
-            this.entitySupplier = entitySupplier;
-            this.locationSetter = locationSetter;
+        public UnifiedRef(Supplier<T> supplier, Consumer<URI> uriConsumer) {
+            this.supplier = supplier;
+            this.uriConsumer = uriConsumer;
         }
 
-        public T entity() {
-            return entitySupplier.get();
+        public T referenced() {
+            return supplier.get();
         }
 
-        public void setLocation(Path location) {
-            locationSetter.accept(URI.create(location.getFileName().toString()));
+        public void setLocation(URI location) {
+            uriConsumer.accept(location);
         }
 
     }
@@ -64,23 +73,25 @@ public class WsdlDownloadMojo extends AbstractMojo {
      *
      */
 
-    private static final String SUFFIX__DEFINITION = ".wsdl";
-    private static final String SUFFIX__SCHEMA = ".xsd";
-
     private static final Pattern keyValuePattern = Pattern.compile(".+[=](?<value>.+)");
 
-    @Component private MavenProject project;
-    @Parameter(required = true, property = "url") private URL[] urls;
-    @Parameter(property = "downloadDirectory", defaultValue = "wsdl") private String downloadDirectory;
+    @Component
+    private MavenProject project;
+    @Parameter(required = true)
+    private URL[] urls = new URL[0];
+    @Parameter(defaultValue = "wsdl")
+    private String downloadDirectory;
+    @Parameter(defaultValue = "true")
+    private boolean removeJaxbGlobalBindings;
 
     private WSDLReader wsdlReader;
     private WSDLWriter wsdlWriter;
     private SchemaWriter schemaWriter;
     private Transformer transformer;
-
+    private DefaultNamespaceContext namespaceContext;
+    private XPath xpath;
     private final Map<URI, Description> roots = new HashMap<>();
-    private final Map<URI, Path> saved = new HashMap<>();
-
+    private final Map<URI, Path> paths = new HashMap<>();
     private Path rootDownloadPath;
     private Path includeDownloadPath;
 
@@ -99,6 +110,15 @@ public class WsdlDownloadMojo extends AbstractMojo {
 
             TransformerFactory transformerFactory = TransformerFactory.newInstance();
             transformer = transformerFactory.newTransformer();
+            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+
+            namespaceContext = new DefaultNamespaceContext();
+            namespaceContext.bindNamespace("jaxb", "http://java.sun.com/xml/ns/jaxb");
+            namespaceContext.bindNamespace("xs", "http://www.w3.org/2001/XMLSchema");
+
+            XPathFactory xpathFactory = XPathFactory.newInstance();
+            xpath = xpathFactory.newXPath();
+            xpath.setNamespaceContext(namespaceContext);
 
             Stream.of(urls).forEach(url -> {
                 Description description = loadWsdl(url);
@@ -118,6 +138,10 @@ public class WsdlDownloadMojo extends AbstractMojo {
      */
 
     private Description loadWsdl(URL url) {
+        getLog().info(
+            "Loading wsdl: " + url
+        );
+
         try {
             return wsdlReader.read(url);
         } catch (Exception thrown) {
@@ -125,106 +149,115 @@ public class WsdlDownloadMojo extends AbstractMojo {
         }
     }
 
-    private <T> void saveReferences(Function<T, Path> writeFunctor, Stream<UnifiedReference<T>> unifiedImports) {
-        unifiedImports.forEach(anImport -> anImport.setLocation(writeFunctor.apply(anImport.entity())));
+    private <T> void saveRefs(URI referencerLocation, Function<T, Path> writeFunctor, Stream<UnifiedRef<T>> unifiedRefs) {
+        unifiedRefs.forEach(ref -> {
+            Path path = writeFunctor.apply(
+                ref.referenced()
+            );
+
+            try {
+                if (roots.containsKey(referencerLocation)) {
+                    ref.setLocation(
+                        new URI(
+                            rootDownloadPath().relativize(path).toString().replace(File.separator, "/")
+                        )
+                    );
+                } else {
+                    ref.setLocation(
+                        new URI(
+                            path.getFileName().toString()
+                        )
+                    );
+                }
+            } catch (URISyntaxException thrown) {
+                throw new RuntimeException(thrown);
+            }
+        });
     }
 
     private Path saveDescription(Description description) {
-        Path path = saved.get(
-            description.getDocumentBaseURI()
-        );
+        URI location = description.getDocumentBaseURI();
+        Path path = paths.get(location);
 
-        if (path != null) {
-            return path;
-        }
-
-        saveReferences(this::saveDescription, description.getImports().stream()
-            .map(ref -> new UnifiedReference<>(ref::getDescription, ref::setLocationURI)));
-        saveReferences(this::saveDescription, description.getIncludes().stream()
-            .map(ref -> new UnifiedReference<>(ref::getDescription, ref::setLocationURI)));
-        saveReferences(this::saveSchema, description.getTypes().getImportedSchemas().stream()
-            .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)));
-        saveReferences(this::saveSchema, description.getTypes().getSchemas().stream()
-            .flatMap(schema -> Stream.concat(schema.getImports().stream()
-                .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)), schema.getIncludes().stream()
-                .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)))));
-
-        try {
+        if (path == null) {
             getLog().info(
-                "Writing wsdl: " + description.getDocumentBaseURI()
+                "Saving wsdl: " + location
             );
 
-            path = path(
-                description.getDocumentBaseURI(),
-                SUFFIX__DEFINITION
-            );
+            try {
+                path = path(location, ".wsdl");
 
-            transformer.transform(
-                new DOMSource(
-                    wsdlWriter.getDocument(description)
-                ),
-                new StreamResult(
-                    Files.newOutputStream(path)
-                )
-            );
+                saveRefs(location, this::saveDescription, description.getImports().stream()
+                    .map(ref -> new UnifiedRef<>(ref::getDescription, ref::setLocationURI)));
+                saveRefs(location, this::saveDescription, description.getIncludes().stream()
+                    .map(ref -> new UnifiedRef<>(ref::getDescription, ref::setLocationURI)));
+                saveRefs(location, this::saveSchema, description.getTypes().getImportedSchemas().stream()
+                    .map(ref -> new UnifiedRef<>(ref::getSchema, ref::setLocationURI)));
+                saveRefs(location, this::saveSchema, description.getTypes().getSchemas().stream()
+                    .flatMap(schema -> Stream.concat(
+                        schema.getImports().stream()
+                            .map(ref -> new UnifiedRef<>(ref::getSchema, ref::setLocationURI)),
+                        schema.getIncludes().stream()
+                            .map(ref -> new UnifiedRef<>(ref::getSchema, ref::setLocationURI)))));
 
-            saved.put(
-                description.getDocumentBaseURI(),
-                path
-            );
+                Document descriptionDocument = wsdlWriter.getDocument(description);
 
-            return path;
-        } catch (Exception thrown) {
-            throw new RuntimeException(thrown);
+                // todo wsdl filtering
+
+                transformer.transform(
+                    new DOMSource(descriptionDocument), new StreamResult(
+                        Files.newOutputStream(path)
+                    )
+                );
+            } catch (Exception thrown) {
+                throw new RuntimeException(thrown);
+            }
         }
+
+        return path;
     }
 
     private Path saveSchema(Schema schema) {
-        Path path = saved.get(
-            schema.getDocumentURI()
-        );
+        URI location = schema.getDocumentURI();
+        Path path = paths.get(location);
 
-        if (path != null) {
-            return path;
-        }
-
-        saveReferences(this::saveSchema, Stream.concat(schema.getImports().stream()
-            .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)), schema.getIncludes().stream()
-            .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI))));
-
-        try {
+        if (path == null) {
             getLog().info(
-                "Writing schema: " + schema.getDocumentURI()
+                "Saving schema: " + schema.getDocumentURI()
             );
 
-            path = path(
-                schema.getDocumentURI(),
-                SUFFIX__SCHEMA
-            );
+            try {
+                path = path(location, ".xsd");
 
-            transformer.transform(
-                new DOMSource(
-                    schemaWriter.getDocument(schema)
-                ),
-                new StreamResult(
-                    Files.newOutputStream(path)
-                )
-            );
+                saveRefs(location, this::saveSchema, Stream.concat(
+                    schema.getImports().stream()
+                        .map(ref -> new UnifiedRef<>(ref::getSchema, ref::setLocationURI)),
+                    schema.getIncludes().stream()
+                        .map(ref -> new UnifiedRef<>(ref::getSchema, ref::setLocationURI))));
 
-            saved.put(
-                schema.getDocumentURI(),
-                path
-            );
+                Document schemaDocument = schemaWriter.getDocument(schema);
 
-            return path;
-        } catch (Exception thrown) {
-            throw new RuntimeException(thrown);
+                if (removeJaxbGlobalBindings) {
+                    removeJaxbGlobalBindings(schemaDocument);
+                    removeExtensionBindingPrefixes(schemaDocument);
+                }
+
+                transformer.transform(
+                    new DOMSource(schemaDocument), new StreamResult(
+                        Files.newOutputStream(path)
+                    )
+                );
+            } catch (Exception thrown) {
+                throw new RuntimeException(thrown);
+            }
         }
+
+        return path;
     }
 
-    private Path path(URI uri, String suffix) throws IOException {
+    private Path path(URI location, String suffix) {
         Matcher matcher = keyValuePattern.matcher(
-            uri.getQuery()
+            location.getQuery()
         );
 
         String fileName;
@@ -232,32 +265,82 @@ public class WsdlDownloadMojo extends AbstractMojo {
         if (matcher.matches()) {
             fileName = matcher.group("value");
         } else {
-            fileName = uri.getPath();
+            fileName = location.getPath();
         }
 
-        String finalFileName = fileName.replace(suffix, "").replaceAll("[\\./\\\\]", "_") + suffix;
+        Path intermediatePath = Paths.get(
+            fileName.replace(suffix, "").concat(suffix)
+        );
 
-        if (roots.containsKey(uri)) {
-            return rootDownloadPath().resolve(finalFileName);
+        Path resultPath;
+
+        if (roots.containsKey(location)) {
+            resultPath = rootDownloadPath().resolve(
+                intermediatePath.getFileName()
+            );
         } else {
-            return includeDownloadPath().resolve(finalFileName);
+            resultPath = includeDownloadPath().resolve(
+                String.format("include_%08x_", location.hashCode()) + intermediatePath.getFileName()
+            );
         }
+
+        paths.put(location, resultPath);
+
+        return resultPath;
     }
 
-    private Path rootDownloadPath() throws IOException {
+    private Path rootDownloadPath() {
         if (rootDownloadPath == null) {
-            rootDownloadPath = Files.createDirectories(project.getBasedir().toPath().resolve(downloadDirectory));
+            try {
+                rootDownloadPath = Files.createDirectories(
+                    project.getBasedir().toPath().resolve(downloadDirectory)
+                );
+            } catch (IOException thrown) {
+                throw new RuntimeException(thrown);
+            }
         }
 
         return rootDownloadPath;
     }
 
-    private Path includeDownloadPath() throws IOException {
+    private Path includeDownloadPath() {
         if (includeDownloadPath == null) {
-            includeDownloadPath = Files.createDirectories(project.getBasedir().toPath().resolve(downloadDirectory).resolve("inc"));
+            try {
+                includeDownloadPath = Files.createDirectories(
+                    project.getBasedir().toPath().resolve(downloadDirectory).resolve("include")
+                );
+            } catch (IOException thrown) {
+                throw new RuntimeException(thrown);
+            }
         }
 
         return includeDownloadPath;
+    }
+
+    private void removeJaxbGlobalBindings(Document document) throws XPathExpressionException {
+        String jaxbPrefix = document.lookupPrefix("http://java.sun.com/xml/ns/jaxb");
+
+        if (jaxbPrefix != null) {
+            XPathExpression xpathExpression = xpath.compile("//xs:schema/xs:annotation/xs:appinfo/jaxb:globalBindings");
+            Node found = (Node) xpathExpression.evaluate(document, XPathConstants.NODE);
+
+            if (found != null) {
+                found.getParentNode().removeChild(found);
+            }
+        }
+    }
+
+    private void removeExtensionBindingPrefixes(Document document) throws XPathExpressionException {
+        String jaxbxjcPrefix = document.lookupPrefix("http://java.sun.com/xml/ns/jaxb/xjc");
+
+        if (jaxbxjcPrefix == null) {
+            XPathExpression xpathExpression = xpath.compile("//xs:schema/@jaxb:extensionBindingPrefixes");
+            Attr found = (Attr) xpathExpression.evaluate(document, XPathConstants.NODE);
+
+            if (found != null) {
+                found.getOwnerElement().removeAttributeNode(found);
+            }
+        }
     }
 
 }
