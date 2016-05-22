@@ -4,17 +4,17 @@ import java.net.URI;
 import java.util.function.Consumer;
 import java.util.function.Supplier;
 
-public class UnifiedReference<TargetType> {
+public class AnyReference<T> {
 
-    private final Supplier<TargetType> targetSupplier;
+    private final Supplier<T> targetSupplier;
     private final Consumer<URI> locationConsumer;
 
-    public UnifiedReference(Supplier<TargetType> targetSupplier, Consumer<URI> locationConsumer) {
+    public AnyReference(Supplier<T> targetSupplier, Consumer<URI> locationConsumer) {
         this.targetSupplier = targetSupplier;
         this.locationConsumer = locationConsumer;
     }
 
-    public TargetType target() {
+    public T target() {
         return targetSupplier.get();
     }
 

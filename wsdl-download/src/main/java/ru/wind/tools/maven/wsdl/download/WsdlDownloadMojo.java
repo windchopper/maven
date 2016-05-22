@@ -10,6 +10,7 @@ import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
 import org.ow2.easywsdl.schema.SchemaFactory;
 import org.ow2.easywsdl.schema.api.Schema;
+import org.ow2.easywsdl.schema.api.SchemaReader;
 import org.ow2.easywsdl.schema.api.SchemaWriter;
 import org.ow2.easywsdl.wsdl.WSDLFactory;
 import org.ow2.easywsdl.wsdl.api.Description;
@@ -20,6 +21,7 @@ import ru.wind.common.util.Buffered;
 
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
+import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -32,11 +34,12 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.util.HashMap;
 import java.util.Map;
-import java.util.concurrent.TimeUnit;
 import java.util.function.Function;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
+
+import static ru.wind.common.util.WithSupport.with;
 
 @Mojo(
     name = "wsdlDownload",
@@ -50,18 +53,24 @@ import java.util.stream.Stream;
     @Parameter(required = true) private URL[] urls;
     @Parameter(defaultValue = "${project.basedir}/src/main/wsdl") private String downloadDirectory;
 
+    private static final Buffered<Transformer, TransformerConfigurationException> transformer = new Buffered<>(() -> {
+        TransformerFactory transformerFactory = TransformerFactory.newInstance();
+        Transformer transformer = transformerFactory.newTransformer();
+        transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+        return transformer;
+    });
+
     private WSDLReader wsdlReader;
     private WSDLWriter wsdlWriter;
+
+    private SchemaReader schemaReader;
     private SchemaWriter schemaWriter;
-    private Transformer transformer;
 
     private final Map<URI, Description> roots = new HashMap<>();
     private final Map<URI, Path> paths = new HashMap<>();
 
-    private Buffered<Path, IOException> rootDownloadPath = new Buffered<>(Long.MAX_VALUE, TimeUnit.MILLISECONDS,
-        () -> Files.createDirectories(Paths.get(downloadDirectory)));
-    private Buffered<Path, IOException> includeDownloadPath = new Buffered<>(Long.MAX_VALUE, TimeUnit.MILLISECONDS,
-        () -> Files.createDirectories(Paths.get(downloadDirectory).resolve("include")));
+    private Buffered<Path, IOException> rootDownloadPath = new Buffered<>(() -> Files.createDirectories(Paths.get(downloadDirectory)));
+    private Buffered<Path, IOException> includeDownloadPath = new Buffered<>(() -> Files.createDirectories(Paths.get(downloadDirectory).resolve("include")));
 
     /*
      *
@@ -70,23 +79,18 @@ import java.util.stream.Stream;
     @Override
     public void execute() throws MojoExecutionException, MojoFailureException {
         try {
-            WSDLFactory wsdlFactory = WSDLFactory.newInstance();
-            wsdlReader = wsdlFactory.newWSDLReader();
-            wsdlWriter = wsdlFactory.newWSDLWriter();
-
-            SchemaFactory schemaFactory = SchemaFactory.newInstance();
-            schemaWriter = schemaFactory.newSchemaWriter();
-
-            TransformerFactory transformerFactory = TransformerFactory.newInstance();
-            transformer = transformerFactory.newTransformer();
-            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-
-            Stream.of(urls).forEach(url -> {
-                Description description = loadWsdl(url);
-                roots.put(description.getDocumentBaseURI(), description);
+            with(WSDLFactory::newInstance, wsdlFactory -> {
+                wsdlReader = wsdlFactory.newWSDLReader();
+                wsdlWriter = wsdlFactory.newWSDLWriter();
             });
 
-            roots.values().forEach(this::saveDescription);
+            with(SchemaFactory::newInstance, schemaFactory -> {
+                schemaReader = schemaFactory.newSchemaReader();
+                schemaWriter = schemaFactory.newSchemaWriter();
+            });
+
+            Stream.of(urls).map(this::loadWsdl).peek(description -> roots.put(description.getDocumentBaseURI(), description))
+                .forEach(this::saveDescription);
         } catch (Exception thrown) {
             throw new MojoFailureException(
                 thrown.getMessage(),
@@ -107,7 +111,7 @@ import java.util.stream.Stream;
         }
     }
 
-    private <T> void saveRefs(URI referencerLocation, Path referencerPath, Function<T, Path> writeFunctor, Stream<UnifiedReference<T>> unifiedRefs) {
+    private <T> void saveRefs(URI referencerLocation, Path referencerPath, Function<T, Path> writeFunctor, Stream<AnyReference<T>> unifiedRefs) {
         unifiedRefs.forEach(ref -> {
             Path path = writeFunctor.apply(
                 ref.target());
@@ -141,21 +145,21 @@ import java.util.stream.Stream;
                 path = path(location, ".wsdl");
 
                 saveRefs(location, path, this::saveDescription, description.getImports().stream()
-                    .map(ref -> new UnifiedReference<>(ref::getDescription, ref::setLocationURI)));
+                    .map(ref -> new AnyReference<>(ref::getDescription, ref::setLocationURI)));
                 saveRefs(location, path, this::saveDescription, description.getIncludes().stream()
-                    .map(ref -> new UnifiedReference<>(ref::getDescription, ref::setLocationURI)));
+                    .map(ref -> new AnyReference<>(ref::getDescription, ref::setLocationURI)));
                 saveRefs(location, path, this::saveSchema, description.getTypes().getImportedSchemas().stream()
-                    .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)));
+                    .map(ref -> new AnyReference<>(ref::getSchema, ref::setLocationURI)));
                 saveRefs(location, path, this::saveSchema, description.getTypes().getSchemas().stream()
                     .flatMap(schema -> Stream.concat(
                         schema.getImports().stream()
-                            .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)),
+                            .map(ref -> new AnyReference<>(ref::getSchema, ref::setLocationURI)),
                         schema.getIncludes().stream()
-                            .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)))));
+                            .map(ref -> new AnyReference<>(ref::getSchema, ref::setLocationURI)))));
 
                 Document descriptionDocument = wsdlWriter.getDocument(description);
 
-                transformer.transform(
+                transformer.value().transform(
                     new DOMSource(descriptionDocument), new StreamResult(
                         Files.newOutputStream(path)
                     )
@@ -181,13 +185,13 @@ import java.util.stream.Stream;
 
                 saveRefs(location, path, this::saveSchema, Stream.concat(
                     schema.getImports().stream()
-                        .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI)),
+                        .map(ref -> new AnyReference<>(ref::getSchema, ref::setLocationURI)),
                     schema.getIncludes().stream()
-                        .map(ref -> new UnifiedReference<>(ref::getSchema, ref::setLocationURI))));
+                        .map(ref -> new AnyReference<>(ref::getSchema, ref::setLocationURI))));
 
                 Document schemaDocument = schemaWriter.getDocument(schema);
 
-                transformer.transform(
+                transformer.value().transform(
                     new DOMSource(schemaDocument), new StreamResult(
                         Files.newOutputStream(path)));
             } catch (Exception thrown) {
