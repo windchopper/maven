@@ -22,9 +22,9 @@
             <version>2.6.0</version>
         </dependency>
         <dependency>
-            <groupId>ru.wind.common</groupId>
+            <groupId>com.github.windchopper.common</groupId>
             <artifactId>common</artifactId>
-            <version>1.0-SNAPSHOT</version>
+            <version>1.0</version>
         </dependency>
         <dependency>
             <groupId>org.apache.maven</groupId>

@@ -1,7 +1,6 @@
 package ru.wind.tools.maven.wsdl.download;
 
 import org.apache.maven.plugin.AbstractMojo;
-import org.apache.maven.plugin.MojoExecutionException;
 import org.apache.maven.plugin.MojoFailureException;
 import org.apache.maven.plugins.annotations.Component;
 import org.apache.maven.plugins.annotations.LifecyclePhase;
@@ -10,18 +9,15 @@ import org.apache.maven.plugins.annotations.Parameter;
 import org.apache.maven.project.MavenProject;
 import org.ow2.easywsdl.schema.SchemaFactory;
 import org.ow2.easywsdl.schema.api.Schema;
-import org.ow2.easywsdl.schema.api.SchemaReader;
 import org.ow2.easywsdl.schema.api.SchemaWriter;
 import org.ow2.easywsdl.wsdl.WSDLFactory;
 import org.ow2.easywsdl.wsdl.api.Description;
 import org.ow2.easywsdl.wsdl.api.WSDLReader;
 import org.ow2.easywsdl.wsdl.api.WSDLWriter;
 import org.w3c.dom.Document;
-import ru.wind.common.util.Buffered;
 
 import javax.xml.transform.OutputKeys;
 import javax.xml.transform.Transformer;
-import javax.xml.transform.TransformerConfigurationException;
 import javax.xml.transform.TransformerFactory;
 import javax.xml.transform.dom.DOMSource;
 import javax.xml.transform.stream.StreamResult;
@@ -39,8 +35,6 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
-import static ru.wind.common.util.WithSupport.with;
-
 @Mojo(
     name = "wsdlDownload",
     defaultPhase = LifecyclePhase.GENERATE_RESOURCES,
@@ -53,41 +47,38 @@ import static ru.wind.common.util.WithSupport.with;
     @Parameter(required = true) private URL[] urls;
     @Parameter(defaultValue = "${project.basedir}/src/main/wsdl") private String downloadDirectory;
 
-    private static final Buffered<Transformer, TransformerConfigurationException> transformer = new Buffered<>(() -> {
-        TransformerFactory transformerFactory = TransformerFactory.newInstance();
-        Transformer transformer = transformerFactory.newTransformer();
-        transformer.setOutputProperty(OutputKeys.INDENT, "yes");
-        return transformer;
-    });
-
+    private Transformer transformer;
     private WSDLReader wsdlReader;
     private WSDLWriter wsdlWriter;
-
-    private SchemaReader schemaReader;
     private SchemaWriter schemaWriter;
 
     private final Map<URI, Description> roots = new HashMap<>();
     private final Map<URI, Path> paths = new HashMap<>();
 
-    private Buffered<Path, IOException> rootDownloadPath = new Buffered<>(() -> Files.createDirectories(Paths.get(downloadDirectory)));
-    private Buffered<Path, IOException> includeDownloadPath = new Buffered<>(() -> Files.createDirectories(Paths.get(downloadDirectory).resolve("include")));
+    private Path rootDownloadPath;
+    private Path includeDownloadPath;
 
     /*
      *
      */
 
     @Override
-    public void execute() throws MojoExecutionException, MojoFailureException {
+    public void execute() throws MojoFailureException {
         try {
-            with(WSDLFactory::newInstance, wsdlFactory -> {
-                wsdlReader = wsdlFactory.newWSDLReader();
-                wsdlWriter = wsdlFactory.newWSDLWriter();
-            });
+            TransformerFactory transformerFactory = TransformerFactory.newInstance();
+            WSDLFactory wsdlFactory = WSDLFactory.newInstance();
+            SchemaFactory schemaFactory = SchemaFactory.newInstance();
 
-            with(SchemaFactory::newInstance, schemaFactory -> {
-                schemaReader = schemaFactory.newSchemaReader();
-                schemaWriter = schemaFactory.newSchemaWriter();
-            });
+            transformer = transformerFactory.newTransformer();
+            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+
+            wsdlReader = wsdlFactory.newWSDLReader();
+            wsdlWriter = wsdlFactory.newWSDLWriter();
+
+            schemaWriter = schemaFactory.newSchemaWriter();
+
+            rootDownloadPath = Files.createDirectories(Paths.get(downloadDirectory));
+            includeDownloadPath = Files.createDirectories(Paths.get(downloadDirectory).resolve("include"));
 
             Stream.of(urls).map(this::loadWsdl).peek(description -> roots.put(description.getDocumentBaseURI(), description))
                 .forEach(this::saveDescription);
@@ -120,7 +111,7 @@ import static ru.wind.common.util.WithSupport.with;
                 if (roots.containsKey(referencerLocation)) {
                     ref.setLocation(
                         new URI(
-                            rootDownloadPath.value().relativize(path).toString().replace(File.separator, "/")));
+                            rootDownloadPath.relativize(path).toString().replace(File.separator, "/")));
                 } else {
                     ref.setLocation(
                         new URI(
@@ -137,9 +128,7 @@ import static ru.wind.common.util.WithSupport.with;
         Path path = paths.get(location);
 
         if (path == null) {
-            getLog().info(
-                "Saving wsdl: " + location
-            );
+            getLog().info("Saving wsdl: " + location);
 
             try {
                 path = path(location, ".wsdl");
@@ -159,11 +148,8 @@ import static ru.wind.common.util.WithSupport.with;
 
                 Document descriptionDocument = wsdlWriter.getDocument(description);
 
-                transformer.value().transform(
-                    new DOMSource(descriptionDocument), new StreamResult(
-                        Files.newOutputStream(path)
-                    )
-                );
+                transformer.transform(new DOMSource(descriptionDocument), new StreamResult(Files.newOutputStream(path)));
+
             } catch (Exception thrown) {
                 throw new RuntimeException(thrown);
             }
@@ -191,7 +177,7 @@ import static ru.wind.common.util.WithSupport.with;
 
                 Document schemaDocument = schemaWriter.getDocument(schema);
 
-                transformer.value().transform(
+                transformer.transform(
                     new DOMSource(schemaDocument), new StreamResult(
                         Files.newOutputStream(path)));
             } catch (Exception thrown) {
@@ -221,9 +207,9 @@ import static ru.wind.common.util.WithSupport.with;
 
         try {
             if (roots.containsKey(location)) {
-                resultPath = rootDownloadPath.value().resolve(intermediatePath.getFileName());
+                resultPath = rootDownloadPath.resolve(intermediatePath.getFileName());
             } else {
-                resultPath = includeDownloadPath.value().resolve(Paths.get(intermediatePath.toString().replaceAll("\\.\\.", "dd")));
+                resultPath = includeDownloadPath.resolve(Paths.get(intermediatePath.toString().replaceAll("\\.\\.", "dd")));
             }
 
             Files.createDirectories(resultPath.getParent());
