@@ -22,7 +22,7 @@
             <version>2.6.0</version>
         </dependency>
         <dependency>
-            <groupId>com.github.windchopper.common</groupId>
+            <groupId>com.github.windchopper</groupId>
             <artifactId>common</artifactId>
             <version>1.0</version>
         </dependency>

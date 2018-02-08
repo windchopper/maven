@@ -65,17 +65,18 @@ import java.util.stream.Stream;
     @Override
     public void execute() throws MojoFailureException {
         try {
-            TransformerFactory transformerFactory = TransformerFactory.newInstance();
-            WSDLFactory wsdlFactory = WSDLFactory.newInstance();
-            SchemaFactory schemaFactory = SchemaFactory.newInstance();
+            transformer = PL.of(TransformerFactory::newInstance)
+                .map(TransformerFactory::newTransformer)
+                .accept(t -> t.setOutputProperty(OutputKeys.INDENT, "yes"))
+                .get();
 
-            transformer = transformerFactory.newTransformer();
-            transformer.setOutputProperty(OutputKeys.INDENT, "yes");
+            PL.of(WSDLFactory::newInstance)
+                .accept(factory -> {
+                    wsdlReader = factory.newWSDLReader();
+                    wsdlWriter = factory.newWSDLWriter();
+                });
 
-            wsdlReader = wsdlFactory.newWSDLReader();
-            wsdlWriter = wsdlFactory.newWSDLWriter();
-
-            schemaWriter = schemaFactory.newSchemaWriter();
+            schemaWriter = SchemaFactory.newInstance().newSchemaWriter();
 
             rootDownloadPath = Files.createDirectories(Paths.get(downloadDirectory));
             includeDownloadPath = Files.createDirectories(Paths.get(downloadDirectory).resolve("include"));
